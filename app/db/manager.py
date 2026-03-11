@@ -5,6 +5,8 @@ import sqlite3
 from .connection import ConnectionHolder
 from .schema import init_schema
 
+def normalize_entity_name(name: str) -> str:
+    return " ".join(name.strip().lower().split())
 
 class DatabaseManager:
     """
@@ -107,7 +109,6 @@ class DatabaseManager:
         self.conn.commit()
         return cur.rowcount > 0
 
-
     def add_entity(
         self,
         name: str,
@@ -124,11 +125,15 @@ class DatabaseManager:
         cat = self.get_category(category_name)
         if cat is None:
             raise ValueError(f"Категория '{category_name}' не найдена")
+
+        normalized_name = normalize_entity_name(name)
+
         cur = self.conn.execute(
-            "INSERT OR IGNORE INTO entities(name, category_id, description) "
-            "VALUES (?,?,?)",
+            "INSERT OR IGNORE INTO entities(name, normalized_name, category_id, description) "
+            "VALUES (?,?,?,?)",
             (
                 name,
+                normalized_name,
                 cat["id"],
                 description,
             ),
@@ -145,23 +150,24 @@ class DatabaseManager:
         param[in] category_name: Optional category name to narrow search
         return[out] Entity dict with keys: id, name, category, description
         """
+        normalized_name = normalize_entity_name(name)
+
         if category_name:
             row = self.conn.execute(
                 "SELECT e.*, c.name as category FROM entities e "
                 "JOIN categories c ON c.id = e.category_id "
-                "WHERE e.name = ? AND c.name = ?",
-                (name, category_name),
+                "WHERE e.normalized_name = ? AND c.name = ?",
+                (normalized_name, category_name),
             ).fetchone()
         else:
             row = self.conn.execute(
                 "SELECT e.*, c.name as category FROM entities e "
                 "JOIN categories c ON c.id = e.category_id "
-                "WHERE e.name = ?",
-                (name,),
+                "WHERE e.normalized_name = ?",
+                (normalized_name,),
             ).fetchone()
-        if not row:
-            return None
-        return dict(row)
+
+        return dict(row) if row else None
 
     def get_entity_by_id(self, entity_id: int) -> Optional[dict]:
         '''
@@ -203,18 +209,22 @@ class DatabaseManager:
         param[in] category_name: Optional category name to narrow deletion
         return[out] True if an entity was deleted, False if not found
         """
+        normalized_name = normalize_entity_name(name)
+
         if category_name:
             cat = self.get_category(category_name)
             if not cat:
                 return False
             cur = self.conn.execute(
-                "DELETE FROM entities WHERE name = ? AND category_id = ?",
-                (name, cat["id"]),
+                "DELETE FROM entities WHERE normalized_name = ? AND category_id = ?",
+                (normalized_name, cat["id"]),
             )
         else:
             cur = self.conn.execute(
-                "DELETE FROM entities WHERE name = ?", (name,)
+                "DELETE FROM entities WHERE normalized_name = ?",
+                (normalized_name,),
             )
+
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -258,6 +268,28 @@ class DatabaseManager:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def update_entity_description(
+        self,
+        entity_id: int,
+        description: str,
+        description_source: str = "",
+        wiki_url: str = "",
+    ) -> bool:
+        cur = self.conn.execute(
+            """
+            UPDATE entities
+            SET description = ?,
+                description_source = ?,
+                wiki_url = ?,
+                description_updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (description, description_source, wiki_url, entity_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+
 
     def add_text(self, content: str, source: str = "") -> int:
         """
@@ -295,7 +327,7 @@ class DatabaseManager:
         return[out] List of text dicts with keys: id, content, source, added
         """
         rows = self.conn.execute(
-            "SELECT * FROM texts ORDER BY added_at DESC"
+            "SELECT * FROM texts ORDER BY added_at DESC, id DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -370,13 +402,16 @@ class DatabaseManager:
         param[in] query: Search query
         return[out] List of entity dicts with keys: id, name, category, description
         """
-        q = f"%{query}%"
+        q = f"%{query.strip()}%"
+        q_norm = f"%{normalize_entity_name(query)}%"
+
         rows = self.conn.execute(
             "SELECT e.*, c.name as category FROM entities e "
             "JOIN categories c ON c.id = e.category_id "
-            "WHERE e.name LIKE ? OR e.description LIKE ?",
-            (q, q),
+            "WHERE e.name LIKE ? OR e.normalized_name LIKE ? OR e.description LIKE ?",
+            (q, q_norm, q),
         ).fetchall()
+
         return [dict(r) for r in rows]
 
     def stats(self) -> dict:

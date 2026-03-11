@@ -11,8 +11,12 @@ CREATE TABLE IF NOT EXISTS categories (
 CREATE TABLE IF NOT EXISTS entities (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT    NOT NULL,
+    normalized_name TEXT    NOT NULL,
     category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
-    description TEXT,
+    description         TEXT,
+    description_source  TEXT,
+    wiki_url            TEXT,
+    description_updated_at TIMESTAMP,
     UNIQUE(name, category_id)
 );
 
@@ -20,6 +24,7 @@ CREATE TABLE IF NOT EXISTS texts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     content    TEXT NOT NULL UNIQUE,
     source     TEXT
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS entity_text_links (
@@ -31,6 +36,7 @@ CREATE TABLE IF NOT EXISTS entity_text_links (
 );
 
 CREATE INDEX IF NOT EXISTS idx_entities_name     ON entities(name);
+CREATE INDEX IF NOT EXISTS idx_entities_norm_name  ON entities(normalized_name);
 CREATE INDEX IF NOT EXISTS idx_entities_category ON entities(category_id);
 CREATE INDEX IF NOT EXISTS idx_links_entity      ON entity_text_links(entity_id);
 CREATE INDEX IF NOT EXISTS idx_links_text        ON entity_text_links(text_id);
