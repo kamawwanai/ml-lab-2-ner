@@ -8,7 +8,7 @@
 
 Итоговая модель используется при построении БД из произвольных текстов (`build_db_from_ner_texts.py`) и в Streamlit‑приложении (`app/streamlit_app.py`) для разбора текста и автодетекта категорий.
 
-(`model_final_ner.ipynb`)[model_final_ner.ipynb]
+(`model_final_ner.ipynb`)[model_final_ner.ipynb] 
 
 ### Архитектура системы
 
