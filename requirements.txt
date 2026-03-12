@@ -1,2 +1,7 @@
 matplotlib
 wordcloud
+streamlit
+spacy
+wikipedia-api
+transformers
+torch

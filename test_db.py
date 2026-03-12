@@ -1,5 +1,5 @@
 # test_db.py
-from db import DatabaseManager
+from app.db import DatabaseManager
 
 
 db = DatabaseManager("data/ner_kb.db")  

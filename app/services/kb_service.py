@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Callable, Any
 import re
 
 from app.db.manager import DatabaseManager, normalize_entity_name
@@ -11,10 +11,12 @@ class KnowledgeBaseService:
         self,
         db: DatabaseManager,
         extractor: BaseNERExtractor,
+        role_nlp: Optional[Callable[[str], Any]] = None,
         explainer: Optional[WikipediaExplainer] = None,
     ):
         self.db = db
         self.extractor = extractor
+        self.role_nlp = role_nlp
         self.explainer = explainer or WikipediaExplainer(language="en")
         self.refresh_extractor()
 
@@ -76,7 +78,7 @@ class KnowledgeBaseService:
         # Fallback heuristic: entity at the beginning of the text
         if text_lower.startswith(ent_lower + " "):
             return "subject"
-        return "mention"
+        return "object"
 
     def _wiki_matches_category(self, wiki_summary: str, category_name: str) -> bool:
         """
@@ -99,6 +101,10 @@ class KnowledgeBaseService:
                 "fish",
                 "insect",
                 "amphibian",
+                "breed",
+                "domesticated",
+                "wildlife",
+                "vertebrate",
             ],
             "job_type": [
                 "profession",
@@ -108,6 +114,9 @@ class KnowledgeBaseService:
                 "title",
                 "role",
                 "position",
+                "employed as",
+                "works as",
+                "is a",
             ],
             "name_of_art": [
                 "novel",
@@ -125,15 +134,98 @@ class KnowledgeBaseService:
                 "ballet",
                 "artwork",
                 "work of art",
+                "short story",
+                "painting by",
+                "film directed",
+                "song by",
             ],
         }
 
-        # fall back: allow user-defined arbitrary categories using simple contains
         keywords = keywords_by_category.get(category, [])
         if not keywords:
             return category in text
 
         return any(kw in text for kw in keywords)
+
+    def build_category_from_local_descriptions(
+        self,
+        category_name: str,
+        source_categories: Optional[list[str]] = None,
+        limit: Optional[int] = None,
+        fetch_missing_descriptions: bool = True,
+    ) -> dict:
+        """
+        brief: Create a fine-grained NER category and
+        automatically populate it using only local information
+        (entity names/descriptions) with simple keyword rules.
+
+        return[out] Dict with basic statistics of the operation.
+        """
+        # Ensure category exists
+        created_category_id = self.db.add_category(
+            category_name,
+            description=f"Auto-built fine-grained category '{category_name}' from local rules",
+        )
+
+        # Collect candidate entities
+        if source_categories:
+            candidates: list[dict] = []
+            for cat_name in source_categories:
+                candidates.extend(self.db.list_entities(category_name=cat_name))
+        else:
+            candidates = self.db.list_entities()
+
+        processed = 0
+        reassigned = 0
+        skipped_no_text = 0
+        skipped_mismatch = 0
+
+        for ent in candidates:
+            if limit is not None and processed >= limit:
+                break
+
+            processed += 1
+            name = ent["name"]
+            text = ent.get("description") or ""
+
+            # fetch description once if missing
+            if not text and fetch_missing_descriptions and self.explainer is not None:
+                wiki_info = self.explainer.explain(name)
+                if wiki_info.get("found") and wiki_info.get("summary"):
+                    text = wiki_info["summary"]
+                    # cache it in DB for future use
+                    self.db.update_entity_description(
+                        entity_id=ent["id"],
+                        description=wiki_info["summary"],
+                        description_source="wikipedia",
+                        wiki_url=wiki_info.get("url") or "",
+                    )
+
+            if not text:
+                skipped_no_text += 1
+                continue
+
+            if not self._wiki_matches_category(text, category_name):
+                skipped_mismatch += 1
+                continue
+
+            if ent["category"] == category_name:
+                # already assigned, nothing to do
+                continue
+
+            self.db.reassign_entity(entity_name=name, new_category_name=category_name)
+            reassigned += 1
+
+        self.refresh_extractor()
+
+        return {
+            "category": category_name,
+            "category_id": created_category_id,
+            "processed_entities": processed,
+            "reassigned_entities": reassigned,
+            "skipped_no_text": skipped_no_text,
+            "skipped_mismatch": skipped_mismatch,
+        }
 
     def add_category(self, name: str, description: str = "") -> int:
         category_id = self.db.add_category(name, description)
@@ -162,19 +254,28 @@ class KnowledgeBaseService:
             return {
                 "text_id": None,
                 "entities": [],
+                "new_entities": [],
                 "message": "Empty text"
             }
 
         text_id = self.db.add_text(cleaned_text, source=source)
         extracted = self.extractor.extract(cleaned_text)
 
-        # Build spaCy doc once if extractor provides it
+        # build spaCy doc once if we have a parser available.
         doc = None
-        nlp = getattr(self.extractor, "nlp", None)
+
+        nlp = self.role_nlp
+        if nlp is None:
+            nlp = getattr(self.extractor, "nlp", None)
+
         if nlp is not None:
-            doc = nlp(cleaned_text)
+            try:
+                doc = nlp(cleaned_text)
+            except Exception:
+                doc = None
 
         saved_entities = []
+        new_entities = []
         seen_pairs = set()
 
         for ent in extracted:
@@ -209,6 +310,11 @@ class KnowledgeBaseService:
                 )
                 entity_data = self.db.get_entity_by_id(entity_id)
                 self.refresh_extractor()
+                new_entities.append({
+                    "id": entity_data["id"],
+                    "name": entity_data["name"],
+                    "category": entity_data["category"],
+                })
             else:
                 entity_id = existing["id"]
                 entity_data = existing
@@ -239,6 +345,7 @@ class KnowledgeBaseService:
         return {
             "text_id": text_id,
             "entities": saved_entities,
+            "new_entities": new_entities,
             "message": f"Stored text and linked {len(saved_entities)} entities"
         }
 
@@ -362,36 +469,13 @@ class KnowledgeBaseService:
         source_categories: Optional[list[str]] = None,
         limit: Optional[int] = None,
     ) -> dict:
-        """
-        brief: Create (or ensure existence of) a fine-grained NER category and
-               automatically populate it using a known KB (Wikipedia) and
-               existing entities.
-
-        This method:
-        1) Ensures that the target category exists in the DB.
-        2) Scans entities from specified source categories (or all entities).
-        3) For each entity fetches a short Wikipedia summary.
-        4) Uses `_wiki_matches_category` to decide whether the entity belongs
-           to the new category.
-        5) If yes, reassigns the entity to the new category.
-        6) Refreshes the extractor once at the end.
-
-        param[in] category_name: Name of the new fine-grained category,
-                                 e.g. "animal", "job_type", "name_of_art".
-        param[in] source_categories: Optional list of coarse categories from
-                                     which to take candidates. If None, all
-                                     entities are considered.
-        param[in] limit: Optional hard limit on number of processed entities.
-
-        return[out] Dict with basic statistics of the operation.
-        """
-        # 1) Ensure category exists
+        # Ensure category exists
         created_category_id = self.db.add_category(
             category_name,
             description=f"Auto-built fine-grained category '{category_name}' from KB",
         )
 
-        # 2) Collect candidate entities
+        # Collect candidate entities
         if source_categories:
             candidates: list[dict] = []
             for cat_name in source_categories:
@@ -425,11 +509,11 @@ class KnowledgeBaseService:
                 # already assigned, nothing to do
                 continue
 
-            # 5) Reassign entity to the new category
+            # Reassign entity to the new category
             self.db.reassign_entity(entity_name=name, new_category_name=category_name)
             reassigned += 1
 
-        # 6) Refresh extractor patterns once at the end
+        # Refresh extractor patterns once at the end
         self.refresh_extractor()
 
         return {

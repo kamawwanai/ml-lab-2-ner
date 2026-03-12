@@ -1,12 +1,14 @@
 import re
+import html
 from typing import Dict, Optional
 
 import colorsys
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-from wordcloud import WordCloud
+try:
+    import matplotlib.colors as mcolors  # type: ignore
+except Exception:  # pragma: no cover
+    mcolors = None  # type: ignore
 
-from db import DatabaseManager
+from app.db import DatabaseManager
 
 
 class NERVisualizer:
@@ -26,7 +28,12 @@ class NERVisualizer:
             saturation = 0.8
             value = 0.9
             r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
-            hex_color = mcolors.to_hex((r, g, b))
+            if mcolors is not None:
+                hex_color = mcolors.to_hex((r, g, b))
+            else:
+                hex_color = "#{:02x}{:02x}{:02x}".format(
+                    int(r * 255), int(g * 255), int(b * 255)
+                )
             self._category_color[category_name] = hex_color
         return self._category_color[category_name]
 
@@ -50,10 +57,6 @@ class NERVisualizer:
             self._entity_cache[row["name"]] = (row["id"], cat_name, color)
 
     def get_entity_weights(self) -> Dict[str, float]:
-        """
-        Weights = count of entity entries in entity_text_links.
-        For no links: weight = 1.
-        """
         cursor = self.db.conn.execute(
             "SELECT entity_id, COUNT(*) as cnt FROM entity_text_links GROUP BY entity_id",
         )
@@ -65,25 +68,26 @@ class NERVisualizer:
         return word_weights
 
     def _color_func(self, word, font_size, position, orientation, random_state=None, **kwargs):
-        """
-        RGB color transformer for wordcloud.
-        Unused arguments for wordcloud usage.
-        """
         # default to grey
         rgb = (0.7, 0.7, 0.7)
         if word in self._entity_cache:
             _, _, color_hex = self._entity_cache[word]
             try:
-                rgb = mcolors.to_rgb(color_hex)
+                if mcolors is not None:
+                    rgb = mcolors.to_rgb(color_hex)
             except ValueError:
                 pass
         return rgb
 
     def generate_wordcloud(self, output_file: Optional[str] = None):
-        """
-        Generates and saves entity wordcloud with category coloring.
-        If output_file is configured, saves the image, otherwise shows it in plt.
-        """
+        try:
+            import matplotlib.pyplot as plt  # type: ignore
+            from wordcloud import WordCloud  # type: ignore
+        except Exception as e:  # pragma: no cover
+            raise ModuleNotFoundError(
+                "Для генерации wordcloud нужны зависимости `matplotlib` и `wordcloud`."
+            ) from e
+
         weights = self.get_entity_weights()
         if not weights:
             print("Could not build wordcloud: no entities detected.")
@@ -129,7 +133,11 @@ class NERVisualizer:
 
         def replacer(match):
             word = match.group(0)
-            _, cat_name, cat_color = self._entity_cache[word]
+            # Lookup case-insensitive: pattern matches with IGNORECASE but cache keys may differ in case
+            key = next((k for k in self._entity_cache if k.lower() == word.lower()), None)
+            if key is None:
+                return word
+            _, cat_name, cat_color = self._entity_cache[key]
             categories_found.add(cat_name)
             return f'<span style="background-color: {cat_color}40; font-weight: bold;">{word}</span>'
 
@@ -148,10 +156,147 @@ class NERVisualizer:
 
         return highlighted
 
+    def highlight_text_entities(self, text: str, entities: list[dict]) -> str:
+        """
+        Highlight entities in a specific text using only entities that are
+        explicitly linked to this text in the DB.
+
+        `entities` is expected to be a list of dicts returned by
+        `DatabaseManager.get_entities_in_text`, with at least keys:
+        - name
+        - category
+        """
+        if not text:
+            return ""
+        if not entities:
+            return html.escape(text)
+
+        names = sorted({e["name"] for e in entities if e.get("name")}, key=len, reverse=True)
+        if not names:
+            return html.escape(text)
+
+        pattern = "|".join(re.escape(n) for n in names)
+
+        local_cache: Dict[str, tuple[str, str]] = {}
+        for e in entities:
+            name = e.get("name")
+            cat = e.get("category")
+            if not name or not cat:
+                continue
+            color = self._get_color_for_category(str(cat))
+            local_cache[name] = (str(cat), color)
+
+        cats_found = set()
+
+        def replacer(match):
+            word = match.group(0)
+            key = next((k for k in local_cache.keys() if k.lower() == word.lower()), None)
+            if key is None:
+                return html.escape(word)
+            cat_name, cat_color = local_cache[key]
+            cats_found.add(cat_name)
+            return f'<span style="background-color: {cat_color}40; font-weight: bold;">{html.escape(word)}</span>'
+
+        highlighted = re.sub(pattern, replacer, text, flags=re.IGNORECASE)
+
+        if cats_found:
+            sorted_cats = sorted(cats_found)
+            category_spans = []
+            for cat in sorted_cats:
+                color = self._get_color_for_category(cat)
+                category_spans.append(
+                    f'<span style="background-color: {color}40; font-weight: bold;">{html.escape(cat)}</span>'
+                )
+            highlighted += "\n\n<hr>\n" + "  ".join(category_spans)
+
+        return highlighted
+
+    def _normalize_label(self, label: str) -> str:
+        raw = (label or "").strip()
+        if not raw:
+            return ""
+        if "-" in raw:
+            prefix, rest = raw.split("-", 1)
+            if prefix.upper() in {"B", "I"} and rest.strip():
+                raw = rest
+        return raw.strip().lower()
+
+    def highlight_by_spans(self, text: str, spans) -> str:
+        if not text:
+            return ""
+
+        norm_spans = []
+        for s in spans or []:
+            start = getattr(s, "start", None)
+            end = getattr(s, "end", None)
+            label = getattr(s, "label", None)
+            if label is None and isinstance(s, dict):
+                label = s.get("category") or s.get("label")
+            if start is None and isinstance(s, dict):
+                start = s.get("start")
+            if end is None and isinstance(s, dict):
+                end = s.get("end")
+
+            try:
+                start_i = int(start)
+                end_i = int(end)
+            except Exception:
+                continue
+
+            if start_i < 0 or end_i <= start_i or end_i > len(text):
+                continue
+
+            cat = self._normalize_label(str(label or ""))
+            if not cat:
+                continue
+
+            norm_spans.append((start_i, end_i, cat))
+
+        if not norm_spans:
+            return html.escape(text)
+
+        norm_spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+
+        out = []
+        cursor = 0
+        cats_found = set()
+
+        for start_i, end_i, cat in norm_spans:
+            if start_i < cursor:
+                continue
+
+            if cursor < start_i:
+                out.append(html.escape(text[cursor:start_i]))
+
+            span_text = text[start_i:end_i]
+            color = self._get_color_for_category(cat)
+            cats_found.add(cat)
+            out.append(
+                f'<span style="background-color: {color}40; font-weight: bold;">{html.escape(span_text)}</span>'
+            )
+            cursor = end_i
+
+        if cursor < len(text):
+            out.append(html.escape(text[cursor:]))
+
+        highlighted = "".join(out)
+
+        if cats_found:
+            sorted_cats = sorted(cats_found)
+            category_spans = []
+            for cat in sorted_cats:
+                color = self._get_color_for_category(cat)
+                category_spans.append(
+                    f'<span style="background-color: {color}40; font-weight: bold;">{html.escape(cat)}</span>'
+                )
+            highlighted += "\n\n<hr>\n" + "  ".join(category_spans)
+
+        return highlighted
+
 
 if __name__ == "__main__":
     # СЮДА ВСТАВИТЬ БД
-    db = DatabaseManager("йоу")
+    db = DatabaseManager("data/ner_kb.db")
     viz = NERVisualizer(db)
 
     viz.generate_wordcloud("wordcloud.png")

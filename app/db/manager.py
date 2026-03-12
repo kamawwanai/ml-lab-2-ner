@@ -1,12 +1,54 @@
 from typing import Optional
 
+import re
 import sqlite3
+import unicodedata
 
 from .connection import ConnectionHolder
 from .schema import init_schema
 
+
+_PUNCT_EDGES_RE = re.compile(r"^[^\w]+|[^\w]+$")
+_MULTISPACE_RE = re.compile(r"\s+")
+
+
 def normalize_entity_name(name: str) -> str:
-    return " ".join(name.strip().lower().split())
+    """
+    Normalize entity surface form to improve matching and aliasing.
+    - Unicode normalize (NFKC)
+    - Lowercase
+    - Trim surrounding punctuation on each token
+    - Strip possessive "'s"
+    - Replace hyphens with spaces
+    - Collapse multiple spaces
+    """
+    if not name:
+        return ""
+
+    text = unicodedata.normalize("NFKC", str(name))
+    text = text.lower()
+
+    tokens: list[str] = []
+    for raw in text.split():
+        token = _PUNCT_EDGES_RE.sub("", raw)
+
+        # remove simple possessive 's / ’s
+        if token.endswith("'s"):
+            token = token[:-2]
+        if token.endswith("’s"):
+            token = token[:-2]
+
+        # split/normalize hyphens
+        token = token.replace("-", " ")
+        token = token.strip()
+        if not token:
+            continue
+
+        tokens.append(token)
+
+    norm = " ".join(tokens)
+    norm = _MULTISPACE_RE.sub(" ", norm).strip()
+    return norm
 
 class DatabaseManager:
     """
@@ -342,20 +384,35 @@ class DatabaseManager:
         return cur.rowcount > 0
 
     def link_entity_to_text(
-        self, entity_id: int, text_id: int, role: str = "mention"
+        self, entity_id: int, text_id: int, role: str = "object"
     ) -> bool:
         """
         brief: Link an entity to a text snippet with a specific role
         param[in] entity_id: ID of the entity
         param[in] text_id: ID of the text
-        param[in] role: Role of the entity in the text (e.g., "subject")
+        param[in] role: Role of the entity in the text (only "subject" or "object")
         return[out] True if the link was created, False if it already exists
         """
-        cur = self.conn.execute(
-            "INSERT OR IGNORE INTO entity_text_links(entity_id, text_id, role) VALUES (?,?,?)",
-            (entity_id, text_id, role),
-        )
-        self.conn.commit()
+        # Extra safety: verify that both sides exist to avoid FK warnings
+        ent = self.get_entity_by_id(entity_id)
+        txt = self.get_text(text_id)
+        if ent is None or txt is None:
+            return False
+
+        if role == "mention":
+            role = "object"
+
+        try:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO entity_text_links(entity_id, text_id, role) VALUES (?,?,?)",
+                (entity_id, text_id, role),
+            )
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            # In extremely rare race conditions (e.g. concurrent deletion),
+            # silently skip creating a broken link
+            return False
+
         return cur.rowcount > 0
 
     def get_texts_for_entity(self, entity_name: str, role: str = None) -> list[dict]:

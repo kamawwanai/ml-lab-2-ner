@@ -23,15 +23,15 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE TABLE IF NOT EXISTS texts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     content    TEXT NOT NULL UNIQUE,
-    source     TEXT
-    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    source     TEXT,
+    added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS entity_text_links (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id  INTEGER NOT NULL REFERENCES entities(id)  ON DELETE CASCADE,
     text_id    INTEGER NOT NULL REFERENCES texts(id)     ON DELETE CASCADE,
-    role       TEXT    NOT NULL DEFAULT 'mention',
+    role       TEXT    NOT NULL DEFAULT 'object',
     UNIQUE(entity_id, text_id, role)
 );
 

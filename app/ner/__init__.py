@@ -1,4 +1,9 @@
 from app.ner.base import BaseNERExtractor, EntitySpan
-from app.ner.spacy_extractor import SpacyExtractor
+from app.ner.hf_transformers_extractor import HFTokenClassificationExtractor
 
-__all__ = ["BaseNERExtractor", "EntitySpan", "SpacyExtractor"]
+
+__all__ = [
+    "BaseNERExtractor",
+    "EntitySpan",
+    "HFTokenClassificationExtractor",
+]
