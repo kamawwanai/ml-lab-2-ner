@@ -1,4 +1,4 @@
-## NER‑система с базой знаний и визуализацией
+<img width="1586" height="820" alt="image" src="https://github.com/user-attachments/assets/b9a08b0b-75fe-435d-91f9-5366e3056b2c" />## NER‑система с базой знаний и визуализацией
 
 Выполнили: Губаренко Анастасия, Каримова Ксения, Пархоменко Николай
 
@@ -8,7 +8,7 @@
 
 Итоговая модель используется при построении БД из произвольных текстов (`build_db_from_ner_texts.py`) и в Streamlit‑приложении (`app/streamlit_app.py`) для разбора текста и автодетекта категорий.
 
-(`ner-model.ipynb`)[ner-model.ipynb]
+(`model_final_ner.ipynb`)[model_final_ner.ipynb]
 
 ### Архитектура системы
 
